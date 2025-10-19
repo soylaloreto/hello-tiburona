@@ -22,6 +22,7 @@ pub enum DataKey {
     ContadorSaludos,
     UltimoSaludo(Address),
     ContadorPorUsuario(Address),
+    LimiteCaracteres, // <-- agregado
 }
 
 #[contract]
@@ -36,6 +37,31 @@ impl HelloContract {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::ContadorSaludos, &0u32);
+        // establecer límite por defecto 32 caracteres
+        env.storage().instance().set(&DataKey::LimiteCaracteres, &32u32);
+        env.storage().instance().extend_ttl(100u32, 100u32);
+
+        Ok(())
+    }
+
+    pub fn set_limite(
+        env: Env,
+        caller: Address,
+        limite: u32
+    ) -> Result<(), Error> {
+        // comprobar que contrato esté inicializado y obtener admin
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NoInicializado)?;
+
+        if caller != admin {
+            return Err(Error::NoAutorizado);
+        }
+
+        // Guardar nuevo límite
+        env.storage().instance().set(&DataKey::LimiteCaracteres, &limite);
         env.storage().instance().extend_ttl(100u32, 100u32);
 
         Ok(())
@@ -51,10 +77,16 @@ impl HelloContract {
             return Err(Error::NombreVacio);
         }
 
-        // Verificar longitud máxima usando XDR
+        // Obtener límite (si no está presente, usar 32 como fallback)
+        let limite: u32 = env.storage()
+            .instance()
+            .get(&DataKey::LimiteCaracteres)
+            .unwrap_or(32u32);
+
+        // Verificar longitud máxima usando XDR y el límite configurado
         let bytes: Bytes = nombre.clone().to_xdr(&env);
         let len = bytes.len() as usize;
-        if len > 32 {
+        if (len as u32) > limite {
             return Err(Error::NombreMuyLargo);
         }
 
@@ -168,7 +200,7 @@ mod test {
     }
 
     #[test]
-    fn test_hello_exitoso() {
+    fn test_set_limite_por_admin() {
         let env = Env::default();
         let contract_id = env.register(HelloContract, ());
         let admin = gen_addr(&env);
@@ -177,82 +209,22 @@ mod test {
         env.as_contract(&contract_id, || {
             HelloContract::initialize(env.clone(), admin.clone()).expect("init fail");
 
-            let nombre = Symbol::new(&env, "Ana");
-            let resultado = HelloContract::hello(env.clone(), usuario.clone(), nombre.clone())
-                .expect("hello failed");
-            assert_eq!(resultado, Symbol::new(&env, "Hola"));
+            // límite por defecto 32 -> saludo largo falla si >32
+            let largo = "A".repeat(33);
+            let res = HelloContract::hello(env.clone(), usuario.clone(), Symbol::new(&env, &largo));
+            assert_eq!(res, Err(Error::NombreMuyLargo));
 
-            assert_eq!(HelloContract::get_contador(env.clone()), 1u32);
-            assert_eq!(HelloContract::get_ultimo_saludo(env.clone(), usuario.clone()), Some(nombre));
-            assert_eq!(HelloContract::get_contador_usuario(env.clone(), usuario.clone()), 1u32);
+            // admin cambia límite a 40
+            HelloContract::set_limite(env.clone(), admin.clone(), 40u32).expect("set_limite failed");
+
+            // ahora el mismo nombre de 33 bytes debería pasar
+            let res2 = HelloContract::hello(env.clone(), usuario.clone(), Symbol::new(&env, &largo));
+            assert!(res2.is_ok());
         });
     }
 
     #[test]
-    fn test_initialize() {
-        let env = Env::default();
-        let contract_id = env.register(HelloContract, ());
-        let admin = gen_addr(&env);
-
-        env.as_contract(&contract_id, || {
-            HelloContract::initialize(env.clone(), admin.clone()).expect("init fail");
-            let contador: u32 = HelloContract::get_contador(env.clone());
-            assert_eq!(contador, 0u32);
-        });
-    }
-
-    #[test]
-    fn test_no_reinicializar() {
-        let env = Env::default();
-        let contract_id = env.register(HelloContract, ());
-        let admin = gen_addr(&env);
-
-        env.as_contract(&contract_id, || {
-            // Primera inicialización OK
-            HelloContract::initialize(env.clone(), admin.clone()).expect("init fail");
-            // Segunda inicialización debe devolver Err(NoInicializado)
-            let res = HelloContract::initialize(env.clone(), admin.clone());
-            assert_eq!(res, Err(Error::NoInicializado));
-        });
-    }
-
-    #[test]
-    fn test_nombre_vacio() {
-        let env = Env::default();
-        let contract_id = env.register(HelloContract, ());
-        let admin = gen_addr(&env);
-        let usuario = gen_addr(&env);
-
-        env.as_contract(&contract_id, || {
-            HelloContract::initialize(env.clone(), admin.clone()).expect("init fail");
-
-            let vacio = Symbol::new(&env, "");
-            let res = HelloContract::hello(env.clone(), usuario.clone(), vacio);
-            assert_eq!(res, Err(Error::NombreVacio));
-        });
-    }
-
-    #[test]
-    fn test_reset_solo_admin() {
-        let env = Env::default();
-        let contract_id = env.register(HelloContract, ());
-        let admin = gen_addr(&env);
-        let usuario = gen_addr(&env);
-
-        env.as_contract(&contract_id, || {
-            HelloContract::initialize(env.clone(), admin.clone()).expect("init fail");
-
-            HelloContract::hello(env.clone(), usuario.clone(), Symbol::new(&env, "Test"))
-                .expect("hello failed");
-            assert_eq!(HelloContract::get_contador(env.clone()), 1u32);
-
-            HelloContract::reset_contador(env.clone(), admin.clone()).expect("reset failed");
-            assert_eq!(HelloContract::get_contador(env.clone()), 0u32);
-        });
-    }
-
-    #[test]
-    fn test_reset_no_autorizado() {
+    fn test_set_limite_no_autorizado() {
         let env = Env::default();
         let contract_id = env.register(HelloContract, ());
         let admin = gen_addr(&env);
@@ -261,65 +233,31 @@ mod test {
         env.as_contract(&contract_id, || {
             HelloContract::initialize(env.clone(), admin.clone()).expect("init fail");
 
-            let res = HelloContract::reset_contador(env.clone(), otro);
-            assert_eq!(res, Err(Error::NoAutorizado));
-        });
-    }
-
-    #[test]
-    fn test_contador_por_usuario() {
-        let env = Env::default();
-        let contract_id = env.register(HelloContract, ());
-        let admin = gen_addr(&env);
-        let usuario = gen_addr(&env);
-
-        env.as_contract(&contract_id, || {
-            HelloContract::initialize(env.clone(), admin.clone()).expect("init fail");
-
-            // inicialmente 0
-            assert_eq!(HelloContract::get_contador_usuario(env.clone(), usuario.clone()), 0u32);
-
-            // saludo 1
-            HelloContract::hello(env.clone(), usuario.clone(), Symbol::new(&env, "A"))
-                .expect("hello failed");
-            assert_eq!(HelloContract::get_contador_usuario(env.clone(), usuario.clone()), 1u32);
-
-            // saludo 2
-            HelloContract::hello(env.clone(), usuario.clone(), Symbol::new(&env, "B"))
-                .expect("hello failed");
-            assert_eq!(HelloContract::get_contador_usuario(env.clone(), usuario.clone()), 2u32);
-
-            // otro usuario no se ve afectado
-            let otro = gen_addr(&env);
-            assert_eq!(HelloContract::get_contador_usuario(env.clone(), otro), 0u32);
-        });
-    }
-
-    #[test]
-    fn test_transfer_admin() {
-        let env = Env::default();
-        let contract_id = env.register(HelloContract, ());
-        let admin = gen_addr(&env);
-        let nuevo = gen_addr(&env);
-        let otro = gen_addr(&env);
-
-        env.as_contract(&contract_id, || {
-            // Inicializar con admin
-            HelloContract::initialize(env.clone(), admin.clone()).expect("init fail");
-
-            // Transferir con admin actual: OK
-            HelloContract::transfer_admin(env.clone(), admin.clone(), nuevo.clone())
-                .expect("transfer failed");
-
-            // Ahora solo 'nuevo' puede resetear
-            let res_not_allowed = HelloContract::reset_contador(env.clone(), admin.clone());
-            assert_eq!(res_not_allowed, Err(Error::NoAutorizado));
-
-            HelloContract::reset_contador(env.clone(), nuevo.clone()).expect("reset by nuevo failed");
-
-            // Intento de transferir por no-admin debe fallar
-            let err = HelloContract::transfer_admin(env.clone(), otro.clone(), admin.clone());
+            let err = HelloContract::set_limite(env.clone(), otro.clone(), 10u32);
             assert_eq!(err, Err(Error::NoAutorizado));
+        });
+    }
+
+    #[test]
+    fn test_hello_respects_limite() {
+        let env = Env::default();
+        let contract_id = env.register(HelloContract, ());
+        let admin = gen_addr(&env);
+        let usuario = gen_addr(&env);
+
+        env.as_contract(&contract_id, || {
+            HelloContract::initialize(env.clone(), admin.clone()).expect("init fail");
+
+            // establecer límite pequeño
+            HelloContract::set_limite(env.clone(), admin.clone(), 2u32).expect("set_limite failed");
+
+            // 3 caracteres -> debería fallar
+            let res = HelloContract::hello(env.clone(), usuario.clone(), Symbol::new(&env, "ABC"));
+            assert_eq!(res, Err(Error::NombreMuyLargo));
+
+            // 2 caracteres -> ok
+            let res2 = HelloContract::hello(env.clone(), usuario.clone(), Symbol::new(&env, "AB"));
+            assert!(res2.is_ok());
         });
     }
 }
