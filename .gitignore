@@ -7,3 +7,6 @@ target
 /target
 **/test_snapshots
 **/*.json
+/target
+**/test_snapshots
+**/*.json
